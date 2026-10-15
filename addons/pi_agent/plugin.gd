@@ -75,5 +75,5 @@ func _add_menu(slot: int, kind: int) -> void:
 
 func _restart() -> void:
 	if panel:
-		panel.start_agent()
+		panel.restart_agent()
 		dock.make_visible()

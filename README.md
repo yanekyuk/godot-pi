@@ -22,6 +22,8 @@ It runs `pi --mode rpc` in your project folder and streams the conversation, too
 - **Live reload.** Open scripts are saved before each prompt. After Pi edits files, the plugin rescans the
   filesystem and reloads the scripts and scenes that Pi touched.
 - **Model and thinking-level pickers**, new session, restart, and context/token/cost stats.
+- **Per-project sessions.** The dock reopens the session it used last in this project. The **History** button lists
+  this project's sessions so you can switch, rename or delete them.
 - **Steer or queue** messages while Pi is working. **Esc** aborts.
 - **Shell commands:** `!cmd` runs a command and adds its output to Pi's context. `!!cmd` runs it without adding the output.
 - **Pi extensions work:** their dialogs open as editor dialogs, and their notifications, status lines and widgets
@@ -61,7 +63,7 @@ From a terminal, the same install looks like this:
 
 ```bash
 cd /path/to/your-project
-VERSION=v0.1.0
+VERSION=v0.2.0
 curl -fL -o /tmp/godot-pi.zip \
   "https://github.com/yanekyuk/godot-pi/releases/download/$VERSION/godot-pi-$VERSION.zip"
 unzip -o /tmp/godot-pi.zip -d .
@@ -90,11 +92,14 @@ Its editor settings (under **Pi Agent**) are stored per user and do nothing once
 | `launch/extra_args` | *(empty)* | Extra CLI arguments, space separated, e.g. `--provider anthropic --model claude-sonnet-4-5`. |
 | `launch/use_login_shell` | on | Start Pi through `$SHELL -lc` so that `PATH` matches your terminal. |
 | `launch/auto_start` | on | Start Pi when the plugin loads. |
-| `launch/continue_last_session` | off | Pass `--continue` to resume this project's most recent session. |
+| `launch/startup_session` | Resume Last Dock Session | Session Pi opens on startup. **Resume Last Dock Session** reopens the session the dock used last in this project. **Continue Most Recent** passes `--continue`, which also picks up sessions started from a terminal. **New Session** always starts fresh. |
 | `behavior/save_scripts_before_prompt` | on | Save open scripts before each prompt, so Pi sees what you see. |
 | `behavior/reload_after_edits` | on | Rescan the filesystem and reload touched scripts and scenes after Pi edits. |
 | `behavior/attach_editor_context` | on | Whether the **Context** toggle starts on. |
 | `display/show_thinking` | on | Show model thinking blocks. |
+
+If `launch/extra_args` already contains a session flag (`--session`, `--continue`, `--resume`, `--no-session`, `--fork`, `--session-id`),
+the plugin adds none of its own.
 
 Pi always runs in the project root, so `res://player.gd` is `./player.gd` for Pi. Pi's own settings, models,
 skills and extensions (`~/.pi`, `.pi/` in the project) apply as usual.
@@ -112,6 +117,25 @@ skills and extensions (`~/.pi`, `.pi/` in the project) apply as usual.
 | Reference code | select code → right-click → **Add Selection to Pi** |
 | Reference files or nodes | right-click in the FileSystem or Scene dock → **Add to Pi Prompt** |
 | Open a file Pi touched | the **open** link on a tool card |
+| Switch, rename or delete sessions | the **History** button. Double-click a session to open it. |
+| Keep the session across restarts | the **restart** button or **Project → Tools → Pi: Restart Agent** |
+
+## Sessions
+
+Pi saves every conversation as a session file. By default it stores them in `~/.pi/agent/sessions/--<project path>--/`.
+The dock tracks sessions per project:
+
+- The session the dock used last is stored in the editor's project metadata (`.godot/editor/project_metadata.cfg`).
+  That file is per user and is not committed. The next time the editor starts, Pi reopens that session.
+- **History** lists every session of this project, including sessions you started from a terminal. It shows the
+  session name (or the first prompt), the last update time and the file size. The active session is marked with ●.
+- **Open** switches Pi to the selected session. If Pi is not running, Open starts Pi with that session.
+- **Rename…** names the active session. To rename a different session, open it first.
+- **Delete…** moves a session file to the trash. You can't delete the active session.
+- Pi writes a new session to disk only after its first prompt. Until then, History shows it as *not saved*.
+
+Pi finds its session folder from `get_state`, so `--session-dir`, `PI_CODING_AGENT_SESSION_DIR` and the
+`sessionDir` setting are respected.
 
 ## Troubleshooting
 
@@ -145,6 +169,7 @@ closed so it shuts down cleanly.
 | `pi_editor_context.gd` | Editor context for prompts and `res://` path mapping |
 | `pi_context_menu.gd` | Right-click menu entries |
 | `pi_format.gd` | Markdown to BBCode and ANSI stripping |
+| `pi_sessions.gd` | Per-project session memory and the session list |
 | `pi_settings.gd` | Editor settings |
 
 ## Known limitations

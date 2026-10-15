@@ -7,6 +7,7 @@ const PiFormat := preload("pi_format.gd")
 const PiEditorContext := preload("pi_editor_context.gd")
 const PiExtensionUI := preload("pi_extension_ui.gd")
 const PiRpcClient := preload("pi_rpc_client.gd")
+const PiSessions := preload("pi_sessions.gd")
 
 const EDIT_TOOLS := ["edit", "write", "bash", "multi_edit", "apply_patch"]
 const MAX_OUTPUT_CHARS := 20000
@@ -19,6 +20,7 @@ var _status_dot: Label
 var _model_btn: OptionButton
 var _thinking_btn: OptionButton
 var _new_btn: Button
+var _sessions_btn: Button
 var _restart_btn: Button
 var _widgets_above: VBoxContainer
 var _widgets_below: VBoxContainer
@@ -33,6 +35,15 @@ var _abort_btn: Button
 var _send_btn: Button
 var _ext_status_label: Label
 var _fs_timer: Timer
+var _sessions_dialog: ConfirmationDialog
+var _sessions_filter: LineEdit
+var _sessions_tree: Tree
+var _sessions_info: Label
+var _sessions_rename_btn: Button
+var _sessions_delete_btn: Button
+var _rename_dialog: ConfirmationDialog
+var _rename_edit: LineEdit
+var _delete_dialog: ConfirmationDialog
 
 # --- theme ---
 var _mono: Font
@@ -58,6 +69,9 @@ var _statuses := {} # extension status key -> text
 var _widgets := {} # widget key -> Label
 var _fs_dirty_paths := {} # res path -> true
 var _fs_dirty := false
+var _session_file := "" # active session file reported by Pi
+var _session_name := ""
+var _sessions: Array = [] # last listing (PiSessions.list_sessions)
 
 
 func setup(p_client: PiRpcClient) -> void:
@@ -84,9 +98,40 @@ func setup(p_client: PiRpcClient) -> void:
 
 # ------------------------------------------------------------------ lifecycle
 
+## Starts Pi using the startup policy (Editor Settings > Pi Agent > Launch > Startup Session).
 func start_agent() -> void:
+	match int(PiSettings.get_value(PiSettings.STARTUP_SESSION)):
+		PiSettings.StartupSession.RESUME_LAST:
+			_launch(_existing(PiSessions.get_last_session()))
+		PiSettings.StartupSession.CONTINUE_RECENT:
+			_launch("", true)
+		_:
+			_launch("")
+
+
+## Restarts Pi and keeps the current session (if it has been saved to disk).
+func restart_agent() -> void:
+	var path := _session_file if not _session_file.is_empty() else PiSessions.get_last_session()
+	_launch(_existing(path))
+
+
+func _existing(path: String) -> String:
+	return path if not path.is_empty() and FileAccess.file_exists(path) else ""
+
+
+## Spawns Pi. `session_path` resumes that file; `continue_recent` passes --continue.
+## Neither is added when the user's extra_args already pick a session.
+func _launch(session_path: String, continue_recent := false) -> void:
 	if client == null:
 		return
+	var args := PiSettings.get_extra_args()
+	if not PiSettings.extra_args_pick_session():
+		if not session_path.is_empty():
+			args.append_array(["--session", session_path])
+		elif continue_recent:
+			args.append("--continue")
+	_session_file = ""
+	_session_name = ""
 	ext_ui.close_all()
 	_clear_transcript()
 	_statuses.clear()
@@ -97,7 +142,7 @@ func start_agent() -> void:
 	var cmd := str(PiSettings.get_value(PiSettings.COMMAND)).strip_edges()
 	if cmd.is_empty():
 		cmd = "pi"
-	var err: Error = client.start(PiEditorContext.project_dir(), cmd, PiSettings.get_extra_args(), bool(PiSettings.get_value(PiSettings.USE_LOGIN_SHELL)))
+	var err: Error = client.start(PiEditorContext.project_dir(), cmd, args, bool(PiSettings.get_value(PiSettings.USE_LOGIN_SHELL)))
 	if err != OK:
 		_notice("Failed to start Pi (`%s`). Check Editor Settings > Pi Agent > Launch." % cmd, _c_error)
 
@@ -190,8 +235,12 @@ func _build_ui() -> void:
 	_new_btn.pressed.connect(_on_new_session)
 	bar.add_child(_new_btn)
 
-	_restart_btn = _icon_button("Reload", "Restart Pi")
-	_restart_btn.pressed.connect(start_agent)
+	_sessions_btn = _icon_button("History", "Sessions of this project")
+	_sessions_btn.pressed.connect(open_sessions_dialog)
+	bar.add_child(_sessions_btn)
+
+	_restart_btn = _icon_button("Reload", "Restart Pi (keeps the current session)")
+	_restart_btn.pressed.connect(restart_agent)
 	bar.add_child(_restart_btn)
 
 	_widgets_above = VBoxContainer.new()
@@ -351,7 +400,15 @@ func _on_state(res: Dictionary) -> void:
 	_select_thinking(str(d.get("thinkingLevel", "")))
 	_set_busy(bool(d.get("isStreaming", false)))
 	var name_ = d.get("sessionName")
-	_new_btn.tooltip_text = "New session (current: %s)" % (str(name_) if name_ != null else str(d.get("sessionId", "?")))
+	_session_name = str(name_) if name_ != null else ""
+	var file_ = d.get("sessionFile")
+	_session_file = str(file_) if file_ != null else ""
+	PiSessions.remember(_session_file)
+	var label := _session_name if not _session_name.is_empty() else str(d.get("sessionId", "?"))
+	_new_btn.tooltip_text = "New session (current: %s)" % label
+	_sessions_btn.tooltip_text = "Sessions of this project (current: %s)" % label
+	if _sessions_dialog and _sessions_dialog.visible:
+		_reload_sessions()
 
 
 func _on_models(res: Dictionary) -> void:
@@ -591,6 +648,231 @@ func _run_bash(command: String, exclude: bool) -> void:
 	_set_card_expanded(card, true)
 
 
+# ------------------------------------------------------------------ sessions
+
+## The active session, or the one the dock will resume when Pi is not running.
+func _current_session_path() -> String:
+	return _session_file if not _session_file.is_empty() else PiSessions.get_last_session()
+
+
+func open_sessions_dialog() -> void:
+	if _sessions_dialog == null:
+		_build_sessions_dialog()
+	_sessions_filter.text = ""
+	_reload_sessions()
+	var scale := EditorInterface.get_editor_scale()
+	_sessions_dialog.popup_centered_clamped(Vector2i(Vector2(760, 460) * scale), 0.9)
+	_sessions_filter.grab_focus.call_deferred()
+
+
+func _build_sessions_dialog() -> void:
+	_sessions_dialog = ConfirmationDialog.new()
+	_sessions_dialog.title = "Pi Sessions"
+	_sessions_dialog.ok_button_text = "Open"
+	_sessions_dialog.cancel_button_text = "Close"
+	_sessions_dialog.dialog_hide_on_ok = false
+	_sessions_dialog.confirmed.connect(_open_selected_session)
+	_sessions_dialog.custom_action.connect(_on_sessions_action)
+
+	var box := VBoxContainer.new()
+	_sessions_dialog.add_child(box)
+	_sessions_filter = LineEdit.new()
+	_sessions_filter.placeholder_text = "Filter by name, first prompt or id"
+	_sessions_filter.clear_button_enabled = true
+	_sessions_filter.text_changed.connect(func(_t: String) -> void: _populate_sessions())
+	box.add_child(_sessions_filter)
+	_sessions_dialog.register_text_enter(_sessions_filter)
+
+	_sessions_tree = Tree.new()
+	_sessions_tree.size_flags_vertical = SIZE_EXPAND_FILL
+	_sessions_tree.hide_root = true
+	_sessions_tree.columns = 3
+	_sessions_tree.column_titles_visible = true
+	_sessions_tree.set_column_title(0, "Session")
+	_sessions_tree.set_column_title(1, "Updated")
+	_sessions_tree.set_column_title(2, "Size")
+	_sessions_tree.set_column_expand(0, true)
+	for c in [1, 2]:
+		_sessions_tree.set_column_expand(c, false)
+		_sessions_tree.set_column_clip_content(c, false)
+	_sessions_tree.select_mode = Tree.SELECT_ROW
+	_sessions_tree.item_selected.connect(_update_session_buttons)
+	_sessions_tree.item_activated.connect(_open_selected_session)
+	box.add_child(_sessions_tree)
+
+	_sessions_info = _small_label()
+	_sessions_info.clip_text = true
+	_sessions_info.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	box.add_child(_sessions_info)
+
+	_sessions_rename_btn = _sessions_dialog.add_button("Rename…", false, "rename")
+	_sessions_delete_btn = _sessions_dialog.add_button("Delete…", false, "delete")
+	_sessions_dialog.add_button("Show in File Manager", false, "show")
+	add_child(_sessions_dialog)
+
+	_rename_dialog = ConfirmationDialog.new()
+	_rename_dialog.title = "Rename Session"
+	_rename_edit = LineEdit.new()
+	_rename_edit.custom_minimum_size.x = 360 * EditorInterface.get_editor_scale()
+	_rename_dialog.add_child(_rename_edit)
+	_rename_dialog.register_text_enter(_rename_edit)
+	_rename_dialog.confirmed.connect(_rename_current_session)
+	add_child(_rename_dialog)
+
+	_delete_dialog = ConfirmationDialog.new()
+	_delete_dialog.title = "Delete Session"
+	_delete_dialog.ok_button_text = "Move to Trash"
+	_delete_dialog.confirmed.connect(_delete_selected_session)
+	add_child(_delete_dialog)
+
+
+## Re-reads the session directory.
+func _reload_sessions() -> void:
+	_sessions = PiSessions.list_sessions()
+	_populate_sessions()
+
+
+## Rebuilds the tree from `_sessions`, applying the filter.
+func _populate_sessions() -> void:
+	var keep := str(_selected_session().get("path", ""))
+	var current := _current_session_path()
+	var filter := _sessions_filter.text.strip_edges().to_lower()
+	_sessions_tree.clear()
+	var root := _sessions_tree.create_item()
+	var rows: Array = _sessions.duplicate()
+	# A new session is only written to disk after its first prompt; still show it.
+	if not _session_file.is_empty() and not FileAccess.file_exists(_session_file):
+		rows.push_front({"path": _session_file, "unsaved": true, "title": _session_name if not _session_name.is_empty() else "New session", "name": _session_name, "first_message": "", "id": "", "modified": 0, "size": 0})
+	var shown := 0
+	for s in rows:
+		if not filter.is_empty():
+			var hay := ("%s\n%s\n%s" % [s.title, s.first_message, s.id]).to_lower()
+			if not hay.contains(filter):
+				continue
+		var it := _sessions_tree.create_item(root)
+		var is_current: bool = s.path == current
+		var title: String = s.title
+		if s.get("unsaved", false):
+			title += "  (not saved until the first prompt)"
+		it.set_text(0, ("● " if is_current else "") + title)
+		it.set_text(1, PiSessions.format_time(int(s.modified)))
+		it.set_text(2, PiSessions.format_size(int(s.size)) if not s.get("unsaved", false) else "")
+		it.set_text_alignment(2, HORIZONTAL_ALIGNMENT_RIGHT)
+		var tip := str(s.first_message).left(600)
+		if not str(s.name).is_empty():
+			tip = "%s\n\n%s" % [s.name, tip]
+		it.set_tooltip_text(0, (tip + "\n\n" if not tip.strip_edges().is_empty() else "") + str(s.path))
+		if is_current:
+			for c in 3:
+				it.set_custom_color(c, _c_accent)
+		it.set_metadata(0, s)
+		if s.path == keep or (keep.is_empty() and shown == 0):
+			it.select(0)
+		shown += 1
+	_sessions_info.text = "%d of %d sessions in %s" % [shown, rows.size(), PiSessions.get_session_dir()] if not rows.is_empty() else "No sessions yet in %s" % PiSessions.get_session_dir()
+	_sessions_info.tooltip_text = PiSessions.get_session_dir()
+	_update_session_buttons()
+
+
+func _selected_session() -> Dictionary:
+	if _sessions_tree == null:
+		return {}
+	var it := _sessions_tree.get_selected()
+	if it == null:
+		return {}
+	var m = it.get_metadata(0)
+	return m if m is Dictionary else {}
+
+
+func _update_session_buttons() -> void:
+	var s := _selected_session()
+	var running := client != null and client.is_running()
+	var is_current: bool = not s.is_empty() and s.path == _current_session_path()
+	var is_active: bool = running and not s.is_empty() and s.path == _session_file
+	_sessions_dialog.get_ok_button().disabled = s.is_empty() or is_active
+	_sessions_dialog.get_ok_button().tooltip_text = "This is the active session." if is_active else ("Switch Pi to this session." if running else "Start Pi with this session.")
+	_sessions_rename_btn.disabled = not is_active
+	_sessions_rename_btn.tooltip_text = "Rename the active session." if is_active else "Only the active session can be renamed. Open it first."
+	_sessions_delete_btn.disabled = s.is_empty() or is_current or s.get("unsaved", false)
+	_sessions_delete_btn.tooltip_text = "Switch to another session before deleting this one." if is_current else "Move the session file to the trash."
+
+
+func _on_sessions_action(action: StringName) -> void:
+	var s := _selected_session()
+	match str(action):
+		"rename":
+			_rename_edit.text = _session_name
+			_rename_dialog.popup_centered()
+			_rename_edit.grab_focus.call_deferred()
+			_rename_edit.select_all.call_deferred()
+		"delete":
+			if s.is_empty():
+				return
+			_delete_dialog.dialog_text = "Move this session to the trash?\n\n%s\n\n%s" % [str(s.title).left(120), s.path]
+			_delete_dialog.popup_centered()
+		"show":
+			var target := str(s.get("path", ""))
+			if target.is_empty() or not FileAccess.file_exists(target):
+				target = PiSessions.get_session_dir()
+			OS.shell_show_in_file_manager(target)
+
+
+func _open_selected_session() -> void:
+	var s := _selected_session()
+	if s.is_empty():
+		return
+	var path := str(s.path)
+	if client == null or not client.is_running():
+		_sessions_dialog.hide()
+		_launch(_existing(path))
+		return
+	if path == _session_file:
+		_sessions_dialog.hide()
+		return
+	if _busy:
+		_sessions_info.text = "Pi is working. Stop it before switching sessions."
+		return
+	var title := str(s.title)
+	var cb := func(res: Dictionary) -> void:
+		if not res.get("success", false):
+			_notice("switch_session failed: %s" % res.get("error", "?"), _c_error)
+			return
+		if res.get("data", {}).get("cancelled", false):
+			_notice("Session switch cancelled by an extension.", _c_warning)
+			return
+		ext_ui.close_all()
+		_clear_transcript()
+		_notice("Switched to session: %s" % title.left(120), _c_dim)
+		client.request({"type": "get_messages"}, _on_messages)
+		_refresh_all_light()
+		_refresh_thinking_levels()
+	_sessions_dialog.hide()
+	client.request({"type": "switch_session", "sessionPath": path}, cb)
+
+
+func _rename_current_session() -> void:
+	var name_ := _rename_edit.text.strip_edges()
+	if name_.is_empty() or client == null or not client.is_running():
+		return
+	var cb := func(res: Dictionary) -> void:
+		if not res.get("success", false):
+			_notice("set_session_name failed: %s" % res.get("error", "?"), _c_error)
+			return
+		client.request({"type": "get_state"}, _on_state)
+	client.request({"type": "set_session_name", "name": name_}, cb)
+
+
+func _delete_selected_session() -> void:
+	var s := _selected_session()
+	if s.is_empty() or s.path == _current_session_path():
+		return
+	var err := PiSessions.trash(str(s.path))
+	if err != OK:
+		_sessions_info.text = "Could not move the session to the trash (%s)." % error_string(err)
+		return
+	_reload_sessions()
+
+
 # ------------------------------------------------------------------ events
 
 func _on_event(ev: Dictionary) -> void:
@@ -775,9 +1057,12 @@ func _on_messages(res: Dictionary) -> void:
 	if not (msgs is Array) or msgs.is_empty():
 		return
 	_clear_transcript()
+	var count := 0
 	for m in msgs:
 		_render_message(m)
-	_notice("Loaded %d messages from session." % msgs.size(), _c_dim)
+		if m is Dictionary and str(m.get("role", "")) != "system":
+			count += 1
+	_notice("Loaded %d messages from session." % count, _c_dim)
 	_stick_bottom = true
 
 

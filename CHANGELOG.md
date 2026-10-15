@@ -3,6 +3,18 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [SemVer](https://semver.org/).
 
+## [0.2.0] - 2026-10-15
+
+### Added
+
+- Per-project sessions. The dock remembers the session it used last in each project (in Godot's project metadata) and reopens it when Pi starts.
+- **History** button with a session browser for the project. Filter, open/switch, rename the active session, delete (moves to trash), show in file manager.
+
+### Changed
+
+- Replaced `launch/continue_last_session` (bool) with `launch/startup_session`: Resume Last Dock Session (default), Continue Most Recent, New Session. If the old setting was on, it becomes Continue Most Recent.
+- Restart keeps the current session instead of starting a new one.
+
 ## [0.1.0] - 2026-10-15
 
 First experimental release.
@@ -19,4 +31,5 @@ First experimental release.
 - Saves open scripts before prompts. Rescans the filesystem and reloads touched scripts and scenes after edits.
 - Editor Settings under "Pi Agent".
 
+[0.2.0]: https://github.com/yanekyuk/godot-pi/releases/tag/v0.2.0
 [0.1.0]: https://github.com/yanekyuk/godot-pi/releases/tag/v0.1.0
