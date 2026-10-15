@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches plugin.cfg version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CFG=$(sed -n 's/^version="\(.*\)"/\1/p' addons/pi_agent/plugin.cfg)
+          echo "tag=$TAG plugin.cfg=$CFG"
+          test "$TAG" = "$CFG" || { echo "::error::Tag v$TAG does not match plugin.cfg version $CFG"; exit 1; }
+
+      - name: Build zip
+        run: |
+          mkdir -p dist
+          zip -r "dist/godot-pi-${GITHUB_REF_NAME}.zip" addons/pi_agent -x '*.DS_Store'
+          unzip -l "dist/godot-pi-${GITHUB_REF_NAME}.zip"
+
+      - name: Extract release notes from CHANGELOG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { on=1; next }
+            on && /^## \[/ { exit }
+            on && /^\[.*\]: / { next }
+            on { print }
+          ' CHANGELOG.md > dist/notes.md
+          cat >> dist/notes.md <<'EOF'
+
+          ### Install
+
+          Download `godot-pi-${{ github.ref_name }}.zip`, extract it into your project root (it contains `addons/pi_agent/`), then enable **Project → Project Settings → Plugins → Pi Agent**. See the [README](https://github.com/${{ github.repository }}#installation).
+          EOF
+          cat dist/notes.md
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PRERELEASE=""
+          case "$GITHUB_REF_NAME" in v0.*|*-*) PRERELEASE="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" "dist/godot-pi-${GITHUB_REF_NAME}.zip" \
+            --title "Pi Agent $GITHUB_REF_NAME" \
+            --notes-file dist/notes.md \
+            $PRERELEASE

@@ -1,0 +1,13 @@
+# Normalize text files to LF.
+* text=auto eol=lf
+*.png binary
+
+# Keep GitHub source archives limited to the addon.
+/.gitattributes  export-ignore
+/.gitignore      export-ignore
+/.github         export-ignore
+/sample          export-ignore
+/project.godot   export-ignore
+/icon.svg        export-ignore
+/icon.svg.import export-ignore
+/docs            export-ignore
