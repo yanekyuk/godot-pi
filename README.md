@@ -65,7 +65,7 @@ From a terminal, the same install looks like this:
 
 ```bash
 cd /path/to/your-project
-VERSION=v0.3.0
+VERSION=v0.3.1
 curl -fL -o /tmp/godot-pi.zip \
   "https://github.com/yanekyuk/godot-pi/releases/download/$VERSION/godot-pi-$VERSION.zip"
 unzip -o /tmp/godot-pi.zip -d .
@@ -211,6 +211,8 @@ closed so it shuts down cleanly.
 
 ## Known limitations
 
+- Thinking cards show only readable text supplied by the provider. Empty or signature-only blocks are
+  hidden; explicitly redacted reasoning is labeled. Opaque signatures cannot be displayed as reasoning.
 - Pi's TUI-only features (`/settings`, custom footers or editors, `ctx.ui.custom()`) do not exist in RPC mode.
   Use the dock's toolbar instead.
 - When the Godot window is not focused, the editor's main loop runs slower, so streaming updates less often.
@@ -243,12 +245,21 @@ prompt submission, steering/follow-ups, rejection/abort recovery, and session re
 or needs provider credentials. On Linux, running the first suite under `xvfb-run` with the X11 display
 driver also exercises native text paste without touching your desktop clipboard.
 
+To capture the thinking-block visual fixture in an isolated X11 editor:
+
+```bash
+PI_TEST_CAPTURE_DIR=/tmp/pi-thinking GODOT=godot xvfb-run -a bash tests/run_editor_tests.sh
+```
+
+The runner saves `thinking-display.png` and checks streamed thinking, empty/signature-only history,
+explicit redaction, expansion, and the Show Thinking preference using synthetic content.
+
 ### Releasing
 
 1. Update `version` in `addons/pi_agent/plugin.cfg` and add an entry to `CHANGELOG.md`.
-2. Commit, then tag and push: `git tag v0.3.0 && git push origin v0.3.0`.
+2. Commit, then tag and push: `git tag v0.3.1 && git push origin v0.3.1`.
 3. The [Release workflow](.github/workflows/release.yml) checks that the tag matches `plugin.cfg`, builds
-   `godot-pi-v0.3.0.zip` from `addons/pi_agent/`, and publishes a GitHub Release. `v0.x` releases are marked
+   `godot-pi-v0.3.1.zip` from `addons/pi_agent/`, and publishes a GitHub Release. `v0.x` releases are marked
    as pre-releases.
 
 ## License

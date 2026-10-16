@@ -87,6 +87,7 @@ func _run() -> void:
 	check(not dock._todo_panel.visible, "New session clears TODOs")
 	check(dock._queued_drafts.is_empty(), "New session clears queued image cache")
 
+	await _test_thinking(dock)
 	dock.queue_free()
 	client.queue_free()
 	# Let editor startup/import finish before shutdown (avoids aborting its scan).
@@ -95,3 +96,81 @@ func _run() -> void:
 		await get_tree().process_frame
 	print("Editor integration tests: %d checks, %d failures" % [checks, failures])
 	get_tree().quit(1 if failures else 0)
+
+
+func _test_thinking(dock: Dock) -> void:
+	EditorInterface.get_editor_settings().set_setting(Settings.SHOW_THINKING, true)
+	dock._clear_transcript()
+	dock._on_event({"type": "message_start", "message": {"role": "assistant"}})
+	dock._on_event({"type": "message_update", "assistantMessageEvent": {"type": "thinking_start", "contentIndex": 0}})
+	var live: Dictionary = dock._blocks[0]
+	check(not live.card.root.visible, "Thinking start must not create an empty visible card")
+	dock._on_event({"type": "message_update", "assistantMessageEvent": {"type": "thinking_delta", "contentIndex": 0, "delta": "Inspect the scene tree first."}})
+	dock._process(0)
+	check(live.card.root.visible and live.label.get_parsed_text() == "Inspect the scene tree first.", "Readable thinking appears while streaming")
+	dock._on_event({"type": "message_update", "assistantMessageEvent": {"type": "thinking_delta", "contentIndex": 0, "delta": "\nThen check the selected script."}})
+	dock._process(0)
+	check(live.label.get_parsed_text().contains("\nThen check"), "Thinking deltas append without losing text")
+	dock._on_event({"type": "message_update", "assistantMessageEvent": {"type": "thinking_end", "contentIndex": 0, "content": "Authoritative readable summary."}})
+	dock._process(0)
+	check(live.label.get_parsed_text() == "Authoritative readable summary.", "Thinking end replaces deltas with authoritative text")
+	dock._on_event({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "thinkingSignature": "opaque-test-signature"}]}})
+	dock._process(0)
+	check(not live.card.root.visible, "Signature-only final content hides previously streamed card")
+
+	dock._clear_transcript()
+	dock._render_message({"role": "assistant", "content": [
+		{"type": "thinking", "thinking": "", "thinkingSignature": "opaque-test-signature"},
+		{"type": "thinking", "thinking": " \n\t"},
+		{"type": "thinking", "thinking": "Inspect the scene tree, then check the selected script.\nOnly readable reasoning should appear in this panel."},
+		{"type": "thinking", "thinking": "", "redacted": true},
+		{"type": "text", "text": "**Ready.** Empty and signature-only thinking blocks are hidden."},
+	]})
+	var assistant: VBoxContainer = dock._transcript.get_child(dock._transcript.get_child_count() - 1)
+	dock._process(0)
+	check(not assistant.get_child(0).visible, "Reopened history hides signature-only thinking")
+	check(not assistant.get_child(1).visible, "Reopened history hides whitespace-only thinking")
+	check(assistant.get_child(2).visible, "Reopened history preserves readable thinking")
+	check(assistant.get_child(3).visible, "Explicit redaction is displayed rather than silently hidden")
+	for i in [2, 3]:
+		var card_root := assistant.get_child(i)
+		var header: Button = card_root.get_child(0).get_child(0)
+		header.pressed.emit()
+		check(card_root.get_child(1).visible, "Thinking header opens body")
+		var label: RichTextLabel = card_root.get_child(1).get_child(0).get_child(0)
+		check(not label.get_parsed_text().strip_edges().is_empty(), "Expanded thinking card has readable text")
+
+	# Exercise the display preference through the same history rendering path.
+	EditorInterface.get_editor_settings().set_setting(Settings.SHOW_THINKING, false)
+	dock._render_message({"role": "assistant", "content": [{"type": "thinking", "thinking": "Hidden by preference."}]})
+	dock._process(0)
+	var hidden: VBoxContainer = dock._transcript.get_child(dock._transcript.get_child_count() - 1)
+	check(not hidden.get_child(0).visible, "Show Thinking preference still hides readable thinking")
+	EditorInterface.get_editor_settings().set_setting(Settings.SHOW_THINKING, true)
+
+	var capture_dir := OS.get_environment("PI_TEST_CAPTURE_DIR")
+	if capture_dir.is_empty():
+		return
+	dock._prompt_edit.reset_draft()
+	dock._set_busy(false)
+	dock._model_btn.add_item("Thinking display fixture")
+	var window := Window.new()
+	window.title = "Pi thinking display regression"
+	window.size = Vector2i(720, 600)
+	window.theme = EditorInterface.get_editor_theme()
+	add_child(window)
+	var margin := MarginContainer.new()
+	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	for side in ["margin_left", "margin_right", "margin_top", "margin_bottom"]:
+		margin.add_theme_constant_override(side, 12)
+	window.add_child(margin)
+	dock.reparent(margin)
+	window.popup_centered()
+	for i in 5:
+		await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	var image := window.get_texture().get_image()
+	check(image.save_png(capture_dir.path_join("thinking-display.png")) == OK, "Save rendered thinking display fixture")
+	print("Thinking display capture: " + capture_dir.path_join("thinking-display.png"))
+	dock.reparent(self)
+	window.queue_free()

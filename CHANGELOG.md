@@ -3,6 +3,12 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [SemVer](https://semver.org/).
 
+## [0.3.1] - 2026-10-16
+
+### Fixed
+
+- Hide empty, whitespace-only, and signature-only thinking blocks instead of displaying blank expandable cards. Readable thinking still streams normally; explicitly redacted content is labeled as unavailable from the provider.
+
 ## [0.3.0] - 2026-10-16
 
 ### Added
@@ -39,6 +45,7 @@ First experimental release.
 - Saves open scripts before prompts. Rescans the filesystem and reloads touched scripts and scenes after edits.
 - Editor Settings under "Pi Agent".
 
+[0.3.1]: https://github.com/yanekyuk/godot-pi/releases/tag/v0.3.1
 [0.3.0]: https://github.com/yanekyuk/godot-pi/releases/tag/v0.3.0
 [0.2.0]: https://github.com/yanekyuk/godot-pi/releases/tag/v0.2.0
 [0.1.0]: https://github.com/yanekyuk/godot-pi/releases/tag/v0.1.0

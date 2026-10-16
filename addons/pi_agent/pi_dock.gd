@@ -1190,7 +1190,9 @@ func _block(idx: int, kind: String) -> Dictionary:
 		card.body.add_child(r)
 		b.label = r
 		b.card = card
-		card.root.visible = bool(PiSettings.get_value(PiSettings.SHOW_THINKING))
+		# Providers may start reasoning blocks that contain only an opaque
+		# signature. Wait for readable text before showing an expandable card.
+		card.root.visible = false
 	else:
 		var r := _rich()
 		_asst_box.add_child(r)
@@ -1214,8 +1216,8 @@ func _finalize_assistant(msg: Dictionary) -> void:
 				"thinking":
 					var b := _block(i, "thinking")
 					b.text = str(c.get("thinking", ""))
-					if b.text.is_empty() and c.get("redacted", false):
-						b.text = "(redacted)"
+					if b.text.strip_edges().is_empty() and c.get("redacted", false):
+						b.text = "(Thinking was redacted by the provider.)"
 					_mark_dirty(b)
 				"toolCall":
 					var card := _tool_card_for(str(c.get("id", "")), str(c.get("name", "")), c.get("arguments"))
@@ -1248,6 +1250,8 @@ func _render_block(b: Dictionary) -> void:
 			var r: RichTextLabel = b.label
 			if not is_instance_valid(r):
 				return
+			var readable := not str(b.text).strip_edges().is_empty()
+			b.card.root.visible = readable and bool(PiSettings.get_value(PiSettings.SHOW_THINKING))
 			r.clear()
 			r.add_text(b.text)
 			var first := str(b.text).strip_edges().get_slice("\n", 0)
