@@ -8,6 +8,8 @@ const PiEditorContext := preload("pi_editor_context.gd")
 const PiExtensionUI := preload("pi_extension_ui.gd")
 const PiRpcClient := preload("pi_rpc_client.gd")
 const PiSessions := preload("pi_sessions.gd")
+const PiPromptEdit := preload("pi_prompt_edit.gd")
+const PiTodoPanel := preload("pi_todo_panel.gd")
 
 const EDIT_TOOLS := ["edit", "write", "bash", "multi_edit", "apply_patch"]
 const MAX_OUTPUT_CHARS := 20000
@@ -27,7 +29,8 @@ var _widgets_below: VBoxContainer
 var _scroll: ScrollContainer
 var _transcript: VBoxContainer
 var _queue_label: Label
-var _prompt_edit: TextEdit
+var _prompt_edit: PiPromptEdit
+var _todo_panel: PiTodoPanel
 var _context_toggle: CheckBox
 var _commands_btn: MenuButton
 var _stats_label: Label
@@ -72,6 +75,8 @@ var _fs_dirty := false
 var _session_file := "" # active session file reported by Pi
 var _session_name := ""
 var _sessions: Array = [] # last listing (PiSessions.list_sessions)
+var _todo_revision := 0 # discard stale history responses after live updates
+var _queued_drafts: Array = [] # {message, draft}, preserving images on clear_queue
 
 
 func setup(p_client: PiRpcClient) -> void:
@@ -134,6 +139,8 @@ func _launch(session_path: String, continue_recent := false) -> void:
 	_session_name = ""
 	ext_ui.close_all()
 	_clear_transcript()
+	_reset_todos()
+	_queued_drafts.clear()
 	_statuses.clear()
 	_refresh_ext_status()
 	for k in _widgets.keys():
@@ -268,10 +275,14 @@ func _build_ui() -> void:
 	_widgets_below = VBoxContainer.new()
 	add_child(_widgets_below)
 
+	_todo_panel = PiTodoPanel.new()
+	add_child(_todo_panel)
+
 	# Input
-	_prompt_edit = TextEdit.new()
+	_prompt_edit = PiPromptEdit.new()
+	_prompt_edit.image_paste_failed.connect(func(message: String) -> void: _notice(message, _c_error))
 	_prompt_edit.custom_minimum_size.y = 72
-	_prompt_edit.placeholder_text = "Ask Pi…  (Enter send · Shift+Enter newline · !cmd runs bash · /command)"
+	_prompt_edit.placeholder_text = "Ask Pi…  (Enter send · Shift+Enter newline · paste images · !cmd · /command)"
 	_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
 	_prompt_edit.scroll_fit_content_height = true
 	_prompt_edit.gui_input.connect(_on_input_gui_input)
@@ -505,6 +516,7 @@ func _on_command_picked(id: int) -> void:
 	var name_ = popup.get_item_metadata(idx)
 	if name_ == null:
 		return
+	_prompt_edit.reset_draft()
 	_prompt_edit.text = "/%s " % name_
 	_prompt_edit.set_caret_line(0)
 	_prompt_edit.set_caret_column(_prompt_edit.text.length())
@@ -551,10 +563,14 @@ func _submit(follow_up: bool = false) -> void:
 	if client == null or not client.is_running():
 		_notice("Pi is not running. Press the restart button.", _c_error)
 		return
-	var text := _prompt_edit.text.strip_edges()
+	var draft := _prompt_edit.get_prompt()
+	var text := str(draft.text).strip_edges()
 	if text.is_empty():
 		return
-	_prompt_edit.text = ""
+	if text.begins_with("!") and not draft.images.is_empty():
+		_notice("Shell commands cannot include images. Remove the image markers or send a chat prompt.", _c_warning)
+		return
+	_prompt_edit.reset_draft()
 
 	if text.begins_with("!"):
 		var exclude := text.begins_with("!!")
@@ -571,14 +587,19 @@ func _submit(follow_up: bool = false) -> void:
 		message += "\n\n" + PiEditorContext.build()
 
 	var cmd := {"type": "prompt", "message": message}
+	if not draft.images.is_empty():
+		cmd["images"] = draft.images
+	var queued := {"message": message, "draft": draft}
 	if _busy:
 		cmd["streamingBehavior"] = "followUp" if follow_up else "steer"
+		_queued_drafts.append(queued)
 	var cb := func(res: Dictionary) -> void:
 		if not res.get("success", false):
+			_queued_drafts.erase(queued)
 			_notice("Prompt rejected: %s" % res.get("error", "?"), _c_error)
-			if _prompt_edit.text.is_empty():
-				_prompt_edit.text = text
+			_prompt_edit.restore_prompt(draft)
 		elif str(res.get("data", {}).get("disposition", "")) == "handled":
+			_queued_drafts.erase(queued)
 			_refresh_all_light()
 	client.request(cmd, cb)
 	_stick_bottom = true
@@ -587,6 +608,7 @@ func _submit(follow_up: bool = false) -> void:
 ## After an extension command, models/commands/session may have changed.
 func _refresh_all_light() -> void:
 	client.request({"type": "get_state"}, _on_state)
+	_refresh_todos()
 	_refresh_stats()
 
 
@@ -594,14 +616,9 @@ func _on_abort() -> void:
 	var cb := func(res: Dictionary) -> void:
 		if res.get("success", false):
 			var d: Dictionary = res.get("data", {})
-			var restored := PackedStringArray()
-			for s in d.get("steering", []):
-				restored.append(str(s))
-			for s in d.get("followUp", []):
-				restored.append(str(s))
-			if not restored.is_empty():
-				var current := _prompt_edit.text.strip_edges()
-				_prompt_edit.text = "\n\n".join(restored) + (("\n\n" + current) if not current.is_empty() else "")
+			for s in d.get("steering", []) + d.get("followUp", []):
+				var draft := _take_queued_draft(str(s))
+				_prompt_edit.restore_prompt(draft if not draft.is_empty() else {"text": str(s), "images": []})
 		client.request({"type": "abort"})
 	client.request({"type": "clear_queue"}, cb)
 
@@ -615,6 +632,8 @@ func _on_new_session() -> void:
 			_notice("New session cancelled by an extension.", _c_warning)
 			return
 		_clear_transcript()
+		_reset_todos()
+		_queued_drafts.clear()
 		_notice("New session.", _c_dim)
 		_refresh_all_light()
 	client.request({"type": "new_session"}, cb)
@@ -842,6 +861,8 @@ func _open_selected_session() -> void:
 			return
 		ext_ui.close_all()
 		_clear_transcript()
+		_reset_todos()
+		_queued_drafts.clear()
 		_notice("Switched to session: %s" % title.left(120), _c_dim)
 		client.request({"type": "get_messages"}, _on_messages)
 		_refresh_all_light()
@@ -911,6 +932,10 @@ func _on_event(ev: Dictionary) -> void:
 				var card: Dictionary = _bash_cards[id]
 				card.out_text += str(ev.get("delta", ""))
 				_mark_dirty(card)
+		"entry_appended":
+			var entry = ev.get("entry")
+			if entry is Dictionary and entry.get("type") == "custom" and entry.get("customType") == PiTodoPanel.STATE_ENTRY_TYPE:
+				_apply_todos(entry.get("data"))
 		"queue_update":
 			_on_queue_update(ev)
 		"compaction_start":
@@ -951,6 +976,7 @@ func _on_message_start(msg) -> void:
 		return
 	match str(msg.get("role", "")):
 		"user":
+			_take_queued_draft(PiFormat.content_text(msg.get("content", ""), false))
 			_add_user_bubble(msg.get("content", ""))
 		"assistant":
 			_begin_assistant()
@@ -1054,7 +1080,10 @@ func _on_messages(res: Dictionary) -> void:
 	if not res.get("success", false):
 		return
 	var msgs = res.get("data", {}).get("messages", [])
-	if not (msgs is Array) or msgs.is_empty():
+	if not (msgs is Array):
+		return
+	if msgs.is_empty():
+		_refresh_todos()
 		return
 	_clear_transcript()
 	var count := 0
@@ -1064,6 +1093,9 @@ func _on_messages(res: Dictionary) -> void:
 			count += 1
 	_notice("Loaded %d messages from session." % count, _c_dim)
 	_stick_bottom = true
+	# Replay may only include post-compaction messages. Restore from the full
+	# active branch after rendering, so history cards cannot overwrite it.
+	_refresh_todos()
 
 
 # ------------------------------------------------------------------ transcript pieces
@@ -1089,13 +1121,36 @@ func _notice(text: String, color: Color) -> void:
 
 
 func _add_user_bubble(content) -> void:
-	var stripped := PiEditorContext.strip(PiFormat.content_text(content))
+	var stripped := PiEditorContext.strip(PiFormat.content_text(content, false))
 	var p := _panel(_c_user_bg, 8)
 	var box := VBoxContainer.new()
 	p.add_child(box)
 	var r := _rich()
 	r.add_text(stripped[0])
 	box.add_child(r)
+	if content is Array:
+		var index := 0
+		for block in content:
+			if not (block is Dictionary) or block.get("type") != "image":
+				continue
+			index += 1
+			var label := _small_label()
+			label.text = "[image #%d]" % index
+			box.add_child(label)
+			var image := PiPromptEdit.decode_image(block)
+			if image != null:
+				# Keep GPU previews small even when the original screenshot is large.
+				var scale_ := minf(1.0, 480.0 / maxf(image.get_width(), image.get_height()))
+				image.resize(maxi(1, int(image.get_width() * scale_)), maxi(1, int(image.get_height() * scale_)))
+				var preview := TextureRect.new()
+				preview.texture = ImageTexture.create_from_image(image)
+				preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				preview.custom_minimum_size.y = minf(image.get_height(), 180)
+				preview.tooltip_text = label.text
+				box.add_child(preview)
+			else:
+				label.text += " (preview unavailable: %s)" % block.get("mimeType", "unknown format")
 	if stripped[1]:
 		var l := _small_label()
 		l.text = "+ editor context"
@@ -1314,6 +1369,8 @@ func _set_card_status(card: Dictionary, status: String) -> void:
 
 
 func _set_card_result(card: Dictionary, result, is_error: bool, partial: bool) -> void:
+	if card.name == "todo" and not partial and not is_error and result is Dictionary:
+		_apply_todos(result.get("details"))
 	if result is Dictionary:
 		card.out_text = PiFormat.content_text(result.get("content", ""))
 		var details = result.get("details")
@@ -1394,9 +1451,9 @@ func _append_diff(r: RichTextLabel, diff: String) -> void:
 # ------------------------------------------------------------------ editor integration
 
 func _on_tool_finished(tool_name: String, args) -> void:
-	if not PiSettings.get_value(PiSettings.RELOAD_AFTER_EDITS):
-		return
 	if not EDIT_TOOLS.has(tool_name):
+		return
+	if not PiSettings.get_value(PiSettings.RELOAD_AFTER_EDITS):
 		return
 	if args is Dictionary:
 		var res_path := PiEditorContext.to_res(str(args.get("path", args.get("file_path", ""))))
@@ -1486,6 +1543,39 @@ func _insert_text(s: String) -> void:
 	_prompt_edit.grab_focus.call_deferred()
 
 
+# ------------------------------------------------------------------ TODO state and queued drafts
+
+func _reset_todos() -> void:
+	_todo_revision += 1
+	_todo_panel.clear_tasks()
+
+
+func _apply_todos(details) -> void:
+	if _todo_panel.apply_snapshot(details):
+		_todo_revision += 1
+
+
+func _refresh_todos() -> void:
+	var revision := _todo_revision
+	var cb := func(res: Dictionary) -> void:
+		if revision != _todo_revision or not res.get("success", false):
+			return
+		var data: Dictionary = res.get("data", {})
+		var entries = data.get("entries")
+		if entries is Array:
+			_apply_todos(PiTodoPanel.snapshot_from_entries(entries, data.get("leafId")))
+	client.request({"type": "get_entries"}, cb)
+
+
+func _take_queued_draft(message: String) -> Dictionary:
+	for i in _queued_drafts.size():
+		if _queued_drafts[i].message == message:
+			var draft: Dictionary = _queued_drafts[i].draft
+			_queued_drafts.remove_at(i)
+			return draft
+	return {}
+
+
 # ------------------------------------------------------------------ extension UI
 
 func _on_ui_request(req: Dictionary) -> void:
@@ -1547,6 +1637,7 @@ func _on_ext_title(title: String) -> void:
 
 
 func _on_ext_editor_text(text: String) -> void:
+	_prompt_edit.reset_draft()
 	_prompt_edit.text = text
 	_prompt_edit.set_caret_line(_prompt_edit.get_line_count() - 1)
 	_prompt_edit.set_caret_column(_prompt_edit.get_line(_prompt_edit.get_line_count() - 1).length())

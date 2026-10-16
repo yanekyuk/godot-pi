@@ -16,6 +16,8 @@ It runs `pi --mode rpc` in your project folder and streams the conversation, too
 ## Features
 
 - **Chat dock** with streaming replies, collapsible thinking blocks, and tool cards that show live output and diffs.
+- **Paste images into prompts** as numbered `[image #1]` markers, with image previews in the conversation.
+- **Live TODO panel** for Pi's `todo` extension, with task statuses, completion progress, and dependency details.
 - **Editor-aware prompts.** The **Context** toggle attaches the open scene, the selected nodes, the current script
   and the code you selected.
 - **Right-click → Add to Pi** in the code editor, the FileSystem dock and the Scene dock.
@@ -63,7 +65,7 @@ From a terminal, the same install looks like this:
 
 ```bash
 cd /path/to/your-project
-VERSION=v0.2.0
+VERSION=v0.3.0
 curl -fL -o /tmp/godot-pi.zip \
   "https://github.com/yanekyuk/godot-pi/releases/download/$VERSION/godot-pi-$VERSION.zip"
 unzip -o /tmp/godot-pi.zip -d .
@@ -114,11 +116,44 @@ skills and extensions (`~/.pi`, `.pi/` in the project) apply as usual.
 | Abort | **Esc** in the input box, or **Stop**. Queued messages go back into the input box. |
 | Run a shell command | `!git status` (output goes into Pi's context) · `!!ls` (output does not) |
 | Commands, prompt templates, skills | the **/** button, or type `/name` |
+| Paste an image | Copy an image → **Ctrl+V** / **Cmd+V** or right-click → **Paste** in the prompt |
+| View TODOs | The collapsible **TODO** panel appears automatically when Pi's `todo` extension creates tasks |
 | Reference code | select code → right-click → **Add Selection to Pi** |
 | Reference files or nodes | right-click in the FileSystem or Scene dock → **Add to Pi Prompt** |
 | Open a file Pi touched | the **open** link on a tool card |
 | Switch, rename or delete sessions | the **History** button. Double-click a session to open it. |
 | Keep the session across restarts | the **restart** button or **Project → Tools → Pi: Restart Agent** |
+
+### Images
+
+Copy the image itself (for example, a screenshot or a browser's **Copy Image**), not its file path.
+Pasting inserts `[image #1]` at the caret; you can keep typing around it or paste more images.
+Only images whose markers remain in the draft are sent. Delete a marker to exclude that image;
+undo restores it. Markers are renumbered in text order when sent.
+
+Images are held in memory and sent as PNG attachments through Pi's RPC protocol, not written into
+your project. Image-only prompts, steering, and follow-ups work too. Rejected prompts and queued
+messages returned by **Stop** retain their image attachments. Sent images have previews in the
+transcript, including when reopening a session. Your chosen model must support image input, and
+clipboard image availability depends on the OS/display server. Shell commands cannot include images.
+
+### TODOs
+
+The dock visualizes the structured task snapshots from the
+[`rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo) Pi extension. If it is not already installed:
+
+```bash
+pi install npm:@juicesharp/rpiv-todo
+```
+
+Restart Pi in the dock after installing. Ask Pi to plan or track a multi-step task; no extra Godot
+configuration is needed. The read-only panel shows active tasks first, pending and completed tasks,
+and a completion bar. Hover a task for its description, active form, owner, and unfinished dependencies.
+Click the heading to collapse it. Deleted tasks are hidden; clearing the list hides the panel.
+
+The panel updates from `todo` results (`details.tasks`) and `rpiv-todo-state` custom entries, including
+nested tool calls. It restores the active branch's latest snapshot on session load, even across
+compaction, and resets when starting or switching sessions. It does not install or replace the Pi extension.
 
 ## Sessions
 
@@ -165,6 +200,8 @@ closed so it shuts down cleanly.
 | `plugin.gd` | Registers the dock, the context menus and the Tools menu item |
 | `pi_rpc_client.gd` | Process and JSON-lines transport: non-blocking reads, atomic chunked writes, request IDs |
 | `pi_dock.gd` | Chat UI and event handling |
+| `pi_prompt_edit.gd` | Image-aware clipboard paste, numbered markers and attachment drafts |
+| `pi_todo_panel.gd` | TODO progress/status view and active-branch snapshot reconstruction |
 | `pi_extension_ui.gd` | Pi extension UI subprotocol |
 | `pi_editor_context.gd` | Editor context for prompts and `res://` path mapping |
 | `pi_context_menu.gd` | Right-click menu entries |
@@ -174,7 +211,6 @@ closed so it shuts down cleanly.
 
 ## Known limitations
 
-- Image attachments are not supported yet.
 - Pi's TUI-only features (`/settings`, custom footers or editors, `ctx.ui.custom()`) do not exist in RPC mode.
   Use the dock's toolbar instead.
 - When the Godot window is not focused, the editor's main loop runs slower, so streaming updates less often.
@@ -193,12 +229,26 @@ godot -e --path godot-pi
 To try Pi's extension UI, set `launch/extra_args` to `-e <path to pi>/examples/extensions/rpc-demo.ts`
 and restart Pi.
 
+### Tests
+
+```bash
+godot --headless --path . --script tests/test_features.gd
+GODOT=godot bash tests/run_editor_tests.sh
+```
+
+Use `godot-mono` instead of `godot` if that is your executable name. The first suite tests attachment
+markers/payloads, undo, image previews, task snapshots, branch replay, and RPC event handling.
+The second (Linux) uses a temporary project and editor settings with a fake Pi client to test dock setup,
+prompt submission, steering/follow-ups, rejection/abort recovery, and session resets. Neither starts Pi
+or needs provider credentials. On Linux, running the first suite under `xvfb-run` with the X11 display
+driver also exercises native text paste without touching your desktop clipboard.
+
 ### Releasing
 
 1. Update `version` in `addons/pi_agent/plugin.cfg` and add an entry to `CHANGELOG.md`.
-2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+2. Commit, then tag and push: `git tag v0.3.0 && git push origin v0.3.0`.
 3. The [Release workflow](.github/workflows/release.yml) checks that the tag matches `plugin.cfg`, builds
-   `godot-pi-v0.2.0.zip` from `addons/pi_agent/`, and publishes a GitHub Release. `v0.x` releases are marked
+   `godot-pi-v0.3.0.zip` from `addons/pi_agent/`, and publishes a GitHub Release. `v0.x` releases are marked
    as pre-releases.
 
 ## License

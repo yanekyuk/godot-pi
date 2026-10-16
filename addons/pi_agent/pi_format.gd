@@ -69,7 +69,7 @@ static func markdown_to_bbcode(md: String, code_color: Color) -> String:
 
 
 ## Plain text of a message `content` (string or content-block array).
-static func content_text(content) -> String:
+static func content_text(content, include_images := true) -> String:
 	if content is String:
 		return content
 	var parts := PackedStringArray()
@@ -81,7 +81,8 @@ static func content_text(content) -> String:
 				"text":
 					parts.append(str(block.get("text", "")))
 				"image":
-					parts.append("[image %s]" % str(block.get("mimeType", "")))
+					if include_images:
+						parts.append("[image %s]" % str(block.get("mimeType", "")))
 	return "\n".join(parts)
 
 
